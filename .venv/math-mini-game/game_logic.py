@@ -143,7 +143,6 @@ def choice_a_exmaple(operations_num=1, spread_between_numbers=[1, 10], number_ro
 					return [example, int(result)]
 		except:
 			pass
-
 	return [example, 0]
 
 
