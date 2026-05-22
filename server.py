@@ -3,14 +3,15 @@ import json
 import os
 import random
 import websockets
+from websockets.http import Headers
 
 SUITS = ['♠', '♥', '♦', '♣']
 RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
 
 class BlackjackGame:
     def __init__(self):
-        self.players = {}          # websocket -> player_data
-        self.phase = "waiting"     # waiting / betting / playing / dealer / finished
+        self.players = {}
+        self.phase = "waiting"
         self.deck = []
         self.dealer_hand = []
         self.current_turn = None
@@ -110,7 +111,8 @@ class BlackjackGame:
             message = json.dumps(state)
             await asyncio.wait([ws.send(message) for ws in self.players])
 
-    async def handler(self, ws, path):
+    async def handler(self, ws):
+        """Обработчик WebSocket-подключений"""
         try:
             init = json.loads(await ws.recv())
             name = init['name']
@@ -187,12 +189,28 @@ class BlackjackGame:
                 self.phase = 'waiting'
                 await self.broadcast_state()
 
+
+async def health_check(path, request_headers):
+    """Обработчик HTTP-запроса для Render Health Check"""
+    if path == "/healthz":
+        return 200, Headers({"Content-Type": "text/plain"}), b"OK"
+    # Для остальных запросов возвращаем 404
+    return 404, Headers(), b"Not Found"
+
+
 async def main():
     game = BlackjackGame()
-    port = int(os.environ.get('PORT', 8765))
-    print(f"Запуск сервера на порту {port}")
-    async with websockets.serve(game.handler, "0.0.0.0", port):
-        await asyncio.Future()  # бесконечный цикл
+    port = int(os.environ.get("PORT", 8765))
+
+    print(f"Запуск WebSocket-сервера с health check на порту {port}")
+    # Передаём обработчик health_check в параметр process_request
+    async with websockets.serve(
+        game.handler,
+        "0.0.0.0",
+        port,
+        process_request=health_check,
+    ):
+        await asyncio.Future()  # бесконечно ждём
 
 if __name__ == "__main__":
     asyncio.run(main())
