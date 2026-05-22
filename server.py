@@ -9,7 +9,7 @@ RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
 
 class BlackjackGame:
     def __init__(self):
-        self.players = {}          # ws -> player_data
+        self.players = {}
         self.phase = "waiting"
         self.deck = []
         self.dealer_hand = []
@@ -200,8 +200,9 @@ async def health_check(request):
     return web.Response(text="OK")
 
 app = web.Application()
+# aiohttp автоматически добавляет HEAD для GET-маршрута, 
+# поэтому отдельно add_head не нужно
 app.router.add_get('/healthz', health_check)
-app.router.add_head('/healthz', health_check)
 app.router.add_get('/ws', game.handle_ws)   # WebSocket endpoint
 
 if __name__ == '__main__':
