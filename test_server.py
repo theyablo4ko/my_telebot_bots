@@ -11,5 +11,5 @@ async def main():
   print("Сервер запущен на ws://localhost:8765", server)
   await server.wait_closed()
 
-if name == "main":
+if __name__ == "__main__":
   asyncio.run(main())
