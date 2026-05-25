@@ -116,7 +116,7 @@ class BlackjackGame:
             await asyncio.wait([ws.send(message) for ws in self.players])
 
     async def ws_handler(self, ws):
-        """Обработчик WebSocket-соединений"""
+        """Обработчик WebSocket-соединений (вызывается только для /ws)"""
         try:
             init_msg = await ws.recv()
             data = json.loads(init_msg)
@@ -195,14 +195,29 @@ class BlackjackGame:
                 self.phase = 'waiting'
                 await self.broadcast_state()
 
+
 # ---------------------- Health check для Render ----------------------
 async def health_check(path, request_headers):
     """Отвечает 200 OK на /healthz, чтобы Render считал сервер живым."""
     if path == "/healthz":
         return HTTPStatus.OK, [], b"OK\n"
 
+
+# ---------------------- Главный обработчик WebSocket ----------------------
+async def main_handler(ws, request_path):
+    """
+    Маршрутизация WebSocket-подключений.
+    Если путь /ws — запускаем игру, иначе закрываем соединение.
+    """
+    if request_path == "/ws":
+        await game.ws_handler(ws)
+    else:
+        await ws.close(4040, "Not Found")
+
+
 # ---------------------- Запуск сервера ----------------------
 async def main():
+    global game
     game = BlackjackGame()
     port = int(os.environ.get("PORT", 8080))
 
@@ -212,13 +227,14 @@ async def main():
     loop.add_signal_handler(signal.SIGTERM, stop.set_result, None)
 
     async with websockets.serve(
-        game.ws_handler,
+        main_handler,
         host="0.0.0.0",
         port=port,
-        process_request=health_check,   # <-- магия для health check
+        process_request=health_check,   # <-- обрабатывает HTTP-запросы (health check)
     ):
         print(f"Сервер запущен на порту {port}")
         await stop
+
 
 if __name__ == "__main__":
     asyncio.run(main())
