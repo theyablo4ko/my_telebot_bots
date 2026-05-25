@@ -1,21 +1,16 @@
-#!/usr/bin/env python
 import asyncio
 import json
 import os
 import random
-import signal
-from http import HTTPStatus
-
-import websockets
+from aiohttp import web, WSMsgType
 
 SUITS = ['♠', '♥', '♦', '♣']
 RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
 
-# ---------------------- Игровая логика ----------------------
 class BlackjackGame:
     def __init__(self):
-        self.players = {}          # websocket -> player_data
-        self.phase = "waiting"     # waiting / betting / playing / dealer / finished
+        self.players = {}          # ws -> player_data
+        self.phase = "waiting"
         self.deck = []
         self.dealer_hand = []
         self.current_turn = None
@@ -113,20 +108,21 @@ class BlackjackGame:
         }
         if self.players:
             message = json.dumps(state)
-            await asyncio.wait([ws.send(message) for ws in self.players])
+            await asyncio.wait([ws.send_str(message) for ws in self.players])
 
-    async def ws_handler(self, ws):
-        """Обработчик WebSocket-соединений (вызывается только для /ws)"""
+    async def handle_ws(self, request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
         try:
-            init_msg = await ws.recv()
+            init_msg = await ws.receive_str()
             data = json.loads(init_msg)
             name = data['name']
             if len(self.players) >= 2:
-                await ws.send(json.dumps({'error': 'Стол полон'}))
+                await ws.send_str(json.dumps({'error': 'Стол полон'}))
                 await ws.close()
-                return
+                return ws
             self.players[ws] = {'name': name, 'hand': [], 'balance': 100, 'status': 'waiting'}
-            await ws.send(json.dumps({'status': 'connected', 'message': f'Добро пожаловать, {name}'}))
+            await ws.send_str(json.dumps({'status': 'connected', 'message': f'Добро пожаловать, {name}'}))
             print(f"Игрок {name} подключился")
 
             if len(self.players) == 2:
@@ -134,107 +130,83 @@ class BlackjackGame:
                 self.current_turn = list(self.players.values())[0]['name']
                 await self.broadcast_state()
 
-            async for message in ws:
-                data = json.loads(message)
-                action = data.get('action')
+            async for msg in ws:
+                if msg.type == WSMsgType.TEXT:
+                    data = json.loads(msg.data)
+                    action = data.get('action')
 
-                if self.phase == 'betting' and action == 'bet':
-                    bet = data['amount']
-                    me = self.players[ws]
-                    if bet <= 0 or bet > me['balance']:
-                        await ws.send(json.dumps({'error': 'Некорректная ставка'}))
-                        continue
-                    self.bets[me['name']] = bet
-                    me['balance'] -= bet
-                    if len(self.bets) == len(self.players):
-                        self.reset_round()
-                    await self.broadcast_state()
-
-                elif self.phase == 'playing' and action in ('put', 'stop'):
-                    if self.current_turn != self.players[ws]['name']:
-                        await ws.send(json.dumps({'error': 'Не ваш ход'}))
-                        continue
-                    if action == 'put':
-                        self.player_hit(self.players[ws]['name'])
-                    else:
-                        self.player_stand(self.players[ws]['name'])
-
-                    # Переход хода
-                    players_list = list(self.players.values())
-                    idx = next(i for i, p in enumerate(players_list) if p['name'] == self.current_turn)
-                    next_idx = (idx + 1) % len(players_list)
-                    all_done = True
-                    for _ in range(len(players_list)):
-                        if players_list[next_idx]['status'] == 'playing':
-                            self.current_turn = players_list[next_idx]['name']
-                            all_done = False
-                            break
-                        next_idx = (next_idx + 1) % len(players_list)
-                    if all_done:
-                        self.phase = 'dealer'
+                    if self.phase == 'betting' and action == 'bet':
+                        bet = data['amount']
+                        me = self.players[ws]
+                        if bet <= 0 or bet > me['balance']:
+                            await ws.send_str(json.dumps({'error': 'Некорректная ставка'}))
+                            continue
+                        self.bets[me['name']] = bet
+                        me['balance'] -= bet
+                        if len(self.bets) == len(self.players):
+                            self.reset_round()
                         await self.broadcast_state()
-                        self.dealer_play()
-                    await self.broadcast_state()
 
-                elif self.phase == 'finished' and action == 'new_round':
-                    for p in self.players.values():
-                        p['hand'] = []
-                        p['status'] = 'waiting'
-                    self.dealer_hand = []
-                    self.phase = 'betting'
-                    self.current_turn = list(self.players.values())[0]['name']
-                    self.result = ""
-                    self.bets = {}
-                    await self.broadcast_state()
+                    elif self.phase == 'playing' and action in ('put', 'stop'):
+                        if self.current_turn != self.players[ws]['name']:
+                            await ws.send_str(json.dumps({'error': 'Не ваш ход'}))
+                            continue
+                        if action == 'put':
+                            self.player_hit(self.players[ws]['name'])
+                        else:
+                            self.player_stand(self.players[ws]['name'])
 
-        except websockets.exceptions.ConnectionClosed:
-            print(f"Игрок {self.players.get(ws, {}).get('name', 'unknown')} отключился")
+                        players_list = list(self.players.values())
+                        idx = next(i for i, p in enumerate(players_list) if p['name'] == self.current_turn)
+                        next_idx = (idx + 1) % len(players_list)
+                        all_done = True
+                        for _ in range(len(players_list)):
+                            if players_list[next_idx]['status'] == 'playing':
+                                self.current_turn = players_list[next_idx]['name']
+                                all_done = False
+                                break
+                            next_idx = (next_idx + 1) % len(players_list)
+                        if all_done:
+                            self.phase = 'dealer'
+                            await self.broadcast_state()
+                            self.dealer_play()
+                        await self.broadcast_state()
+
+                    elif self.phase == 'finished' and action == 'new_round':
+                        for p in self.players.values():
+                            p['hand'] = []
+                            p['status'] = 'waiting'
+                        self.dealer_hand = []
+                        self.phase = 'betting'
+                        self.current_turn = list(self.players.values())[0]['name']
+                        self.result = ""
+                        self.bets = {}
+                        await self.broadcast_state()
+
+                elif msg.type == WSMsgType.ERROR:
+                    print(f'WebSocket error: {ws.exception()}')
+        except Exception as e:
+            print(f"Exception: {e}")
+        finally:
             if ws in self.players:
+                name = self.players[ws]['name']
                 del self.players[ws]
-            if len(self.players) < 2:
-                self.phase = 'waiting'
-                await self.broadcast_state()
+                print(f"Игрок {name} отключился")
+                if len(self.players) < 2:
+                    self.phase = 'waiting'
+                    await self.broadcast_state()
+        return ws
 
+game = BlackjackGame()
 
-# ---------------------- Health check для Render ----------------------
-async def health_check(path, request_headers):
-    """Отвечает 200 OK на /healthz, чтобы Render считал сервер живым."""
-    if path == "/healthz":
-        return HTTPStatus.OK, [], b"OK\n"
+async def health_check(request):
+    return web.Response(text="OK")
 
+app = web.Application()
+# aiohttp автоматически поддерживает HEAD для GET-маршрутов!
+app.router.add_get('/healthz', health_check)
+app.router.add_get('/ws', game.handle_ws)   # WebSocket endpoint
 
-# ---------------------- Главный обработчик WebSocket ----------------------
-async def main_handler(ws, request_path):
-    """
-    Маршрутизация WebSocket-подключений.
-    Если путь /ws — запускаем игру, иначе закрываем соединение.
-    """
-    if request_path == "/ws":
-        await game.ws_handler(ws)
-    else:
-        await ws.close(4040, "Not Found")
-
-
-# ---------------------- Запуск сервера ----------------------
-async def main():
-    global game
-    game = BlackjackGame()
-    port = int(os.environ.get("PORT", 8080))
-
-    # Чтобы Render мог корректно остановить сервер
-    loop = asyncio.get_running_loop()
-    stop = loop.create_future()
-    loop.add_signal_handler(signal.SIGTERM, stop.set_result, None)
-
-    async with websockets.serve(
-        main_handler,
-        host="0.0.0.0",
-        port=port,
-        process_request=health_check,   # <-- обрабатывает HTTP-запросы (health check)
-    ):
-        print(f"Сервер запущен на порту {port}")
-        await stop
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 8765))
+    web.run_app(app, host='0.0.0.0', port=port)
