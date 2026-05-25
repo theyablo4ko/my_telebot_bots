@@ -1,8 +1,13 @@
 import asyncio
 import json
+import logging
 import os
 import random
 from aiohttp import web, WSMsgType
+
+# Настройка логов
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
 
 SUITS = ['♠', '♥', '♦', '♣']
 RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
@@ -92,6 +97,7 @@ class BlackjackGame:
         self.result = "\n".join(msgs)
 
     async def broadcast_state(self):
+        """Отправляет текущее состояние всем подключённым игрокам."""
         state = {
             'phase': self.phase,
             'current_turn': self.current_turn,
@@ -108,35 +114,68 @@ class BlackjackGame:
         }
         if self.players:
             message = json.dumps(state)
+            logger.info(f"Broadcasting state to {len(self.players)} player(s)")
             await asyncio.wait([ws.send_str(message) for ws in self.players])
 
     async def handle_ws(self, request):
         ws = web.WebSocketResponse()
         await ws.prepare(request)
+        logger.info(f"WebSocket connection attempt from {request.remote}")
+
         try:
-            init_msg = await ws.receive_str()
-            data = json.loads(init_msg)
-            name = data['name']
-            if len(self.players) >= 2:
-                await ws.send_str(json.dumps({'error': 'Стол полон'}))
+            # Ждём первое сообщение — ник
+            init_msg = await ws.receive()
+            if init_msg.type != WSMsgType.TEXT:
+                logger.warning("First message is not text, closing")
                 await ws.close()
                 return ws
-            self.players[ws] = {'name': name, 'hand': [], 'balance': 100, 'status': 'waiting'}
-            await ws.send_str(json.dumps({'status': 'connected', 'message': f'Добро пожаловать, {name}'}))
-            print(f"Игрок {name} подключился")
 
+            try:
+                data = json.loads(init_msg.data)
+            except json.JSONDecodeError:
+                logger.error(f"Invalid JSON received: {init_msg.data}")
+                await ws.send_str(json.dumps({'error': 'Неверный формат'}))
+                await ws.close()
+                return ws
+
+            name = data.get('name', '').strip()
+            if not name:
+                await ws.send_str(json.dumps({'error': 'Имя не указано'}))
+                await ws.close()
+                return ws
+
+            if len(self.players) >= 2:
+                await ws.send_str(json.dumps({'error': 'Стол полон, максимум 2 игрока'}))
+                await ws.close()
+                return ws
+
+            # Добавляем игрока
+            self.players[ws] = {'name': name, 'hand': [], 'balance': 100, 'status': 'waiting'}
+            logger.info(f"Игрок {name} подключился")
+
+            # Всегда отправляем состояние сразу после подключения (в том числе и waiting)
+            await self.broadcast_state()
+
+            # Если набралось двое — начинаем фазу ставок
             if len(self.players) == 2:
                 self.phase = 'betting'
                 self.current_turn = list(self.players.values())[0]['name']
                 await self.broadcast_state()
 
+            # Основной цикл приёма сообщений
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
-                    data = json.loads(msg.data)
-                    action = data.get('action')
+                    logger.info(f"Message from {name}: {msg.data}")
+                    try:
+                        data = json.loads(msg.data)
+                    except json.JSONDecodeError:
+                        await ws.send_str(json.dumps({'error': 'Неверный JSON'}))
+                        continue
 
+                    action = data.get('action')
+                    # Обработка действий (точно как раньше)
                     if self.phase == 'betting' and action == 'bet':
-                        bet = data['amount']
+                        bet = data.get('amount', 0)
                         me = self.players[ws]
                         if bet <= 0 or bet > me['balance']:
                             await ws.send_str(json.dumps({'error': 'Некорректная ставка'}))
@@ -156,6 +195,7 @@ class BlackjackGame:
                         else:
                             self.player_stand(self.players[ws]['name'])
 
+                        # Переход хода
                         players_list = list(self.players.values())
                         idx = next(i for i, p in enumerate(players_list) if p['name'] == self.current_turn)
                         next_idx = (idx + 1) % len(players_list)
@@ -184,29 +224,38 @@ class BlackjackGame:
                         await self.broadcast_state()
 
                 elif msg.type == WSMsgType.ERROR:
-                    print(f'WebSocket error: {ws.exception()}')
+                    logger.error(f'WebSocket error: {ws.exception()}')
+                else:
+                    logger.info(f"Non-text message type {msg.type} ignored")
+
         except Exception as e:
-            print(f"Exception: {e}")
+            logger.error(f"Exception in handle_ws: {e}")
         finally:
             if ws in self.players:
                 name = self.players[ws]['name']
                 del self.players[ws]
-                print(f"Игрок {name} отключился")
+                logger.info(f"Игрок {name} отключился")
                 if len(self.players) < 2:
                     self.phase = 'waiting'
-                    await self.broadcast_state()
+                await self.broadcast_state()
         return ws
 
-game = BlackjackGame()
-
+# ---------- HTTP health check + логирование ----------
 async def health_check(request):
+    logger.info(f"Health check from {request.remote}")
     return web.Response(text="OK")
 
-app = web.Application()
-# aiohttp автоматически поддерживает HEAD для GET-маршрутов!
+@web.middleware
+async def log_middleware(request, handler):
+    logger.info(f"HTTP {request.method} {request.path} from {request.remote}")
+    return await handler(request)
+
+app = web.Application(middlewares=[log_middleware])
 app.router.add_get('/healthz', health_check)
-app.router.add_get('/ws', game.handle_ws)   # WebSocket endpoint
+app.router.add_get('/ws', game.handle_ws)   # game определится ниже
 
 if __name__ == '__main__':
+    game = BlackjackGame()
     port = int(os.environ.get('PORT', 8765))
+    logger.info(f"Starting server on port {port}")
     web.run_app(app, host='0.0.0.0', port=port)
