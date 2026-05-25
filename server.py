@@ -1,18 +1,21 @@
+#!/usr/bin/env python
 import asyncio
 import json
 import os
 import random
-import websockets
+import signal
 from http import HTTPStatus
+
+import websockets
 
 SUITS = ['♠', '♥', '♦', '♣']
 RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
 
-# ---------- Игра (вся логика без изменений) ----------
+# ---------------------- Игровая логика ----------------------
 class BlackjackGame:
     def __init__(self):
-        self.players = {}
-        self.phase = "waiting"
+        self.players = {}          # websocket -> player_data
+        self.phase = "waiting"     # waiting / betting / playing / dealer / finished
         self.deck = []
         self.dealer_hand = []
         self.current_turn = None
@@ -37,8 +40,10 @@ class BlackjackGame:
     @staticmethod
     def card_value(card):
         rank = card[:-1]
-        if rank in ('J', 'Q', 'K'): return 10
-        if rank == 'A': return 11
+        if rank in ('J', 'Q', 'K'):
+            return 10
+        if rank == 'A':
+            return 11
         return int(rank)
 
     def hand_score(self, hand):
@@ -111,6 +116,7 @@ class BlackjackGame:
             await asyncio.wait([ws.send(message) for ws in self.players])
 
     async def ws_handler(self, ws):
+        """Обработчик WebSocket-соединений"""
         try:
             init_msg = await ws.recv()
             data = json.loads(init_msg)
@@ -131,8 +137,7 @@ class BlackjackGame:
             async for message in ws:
                 data = json.loads(message)
                 action = data.get('action')
-                # ... (вся логика обработки ходов, скопируй её из предыдущей полной версии)
-                # Ниже вставлена сокращённая версия, но лучше возьми полную из ответа с aiohttp
+
                 if self.phase == 'betting' and action == 'bet':
                     bet = data['amount']
                     me = self.players[ws]
@@ -154,6 +159,7 @@ class BlackjackGame:
                     else:
                         self.player_stand(self.players[ws]['name'])
 
+                    # Переход хода
                     players_list = list(self.players.values())
                     idx = next(i for i, p in enumerate(players_list) if p['name'] == self.current_turn)
                     next_idx = (idx + 1) % len(players_list)
@@ -182,154 +188,37 @@ class BlackjackGame:
                     await self.broadcast_state()
 
         except websockets.exceptions.ConnectionClosed:
-            print(f"Игрок отключился")
+            print(f"Игрок {self.players.get(ws, {}).get('name', 'unknown')} отключился")
             if ws in self.players:
                 del self.players[ws]
             if len(self.players) < 2:
                 self.phase = 'waiting'
                 await self.broadcast_state()
 
-game = BlackjackGame()
+# ---------------------- Health check для Render ----------------------
+async def health_check(path, request_headers):
+    """Отвечает 200 OK на /healthz, чтобы Render считал сервер живым."""
+    if path == "/healthz":
+        return HTTPStatus.OK, [], b"OK\n"
 
-# ---------- HTTP-обработчик для health check ----------
-async def handle_http(reader, writer):
-    try:
-        data = await asyncio.wait_for(reader.read(4096), timeout=5)
-        if not data:
-            writer.close()
-            return
-        request_line = data.split(b'\r\n')[0].decode()
-        parts = request_line.split()
-        if len(parts) < 2:
-            writer.close()
-            return
-        method, path = parts[0], parts[1]
-
-        if path == '/healthz':
-            body = "OK"
-            if method.upper() == 'HEAD':
-                response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n"
-            else:
-                response = f"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {len(body)}\r\n\r\n{body}".encode()
-            writer.write(response)
-        else:
-            writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
-        await writer.drain()
-    except Exception:
-        pass
-    finally:
-        writer.close()
-        await writer.wait_closed()
-
-# ---------- Главный сервер ----------
+# ---------------------- Запуск сервера ----------------------
 async def main():
-    port = int(os.environ.get('PORT', 8765))
-    # Запускаем websockets сервер на отдельном сокете, но мы можем повесить оба на один порт?
-    # Нет, asyncio.start_server можно запустить только один раз на порту.
-    # Поэтому используем подход: создаём общий сервер, который разбирает запросы.
-    # Если запрос HTTP (особенно HEAD) – отвечаем сами.
-    # Если WebSocket (GET + Upgrade) – передаём управление websockets.
+    game = BlackjackGame()
+    port = int(os.environ.get("PORT", 8080))
 
-    server = await asyncio.start_server(handle_connection, '0.0.0.0', port)
-    print(f"Сервер запущен на порту {port}")
-    await server.serve_forever()
+    # Чтобы Render мог корректно остановить сервер
+    loop = asyncio.get_running_loop()
+    stop = loop.create_future()
+    loop.add_signal_handler(signal.SIGTERM, stop.set_result, None)
 
-async def handle_connection(reader, writer):
-    # Читаем первые 4 байта, чтобы понять, HTTP или нет
-    try:
-        peek = await asyncio.wait_for(reader.read(4), timeout=5)
-    except asyncio.TimeoutError:
-        writer.close()
-        return
+    async with websockets.serve(
+        game.ws_handler,
+        host="0.0.0.0",
+        port=port,
+        process_request=health_check,   # <-- магия для health check
+    ):
+        print(f"Сервер запущен на порту {port}")
+        await stop
 
-    if not peek:
-        writer.close()
-        return
-
-    # Если запрос начинается с HTTP-метода (GET, HEAD...)
-    if peek.startswith(b'GET ') or peek.startswith(b'HEAD ') or peek.startswith(b'POST ') or peek.startswith(b'PUT '):
-        # Читаем остаток запроса
-        data = peek + await asyncio.wait_for(reader.read(4092), timeout=5)
-        request_text = data.split(b'\r\n\r\n')[0].decode()
-        headers = request_text.split('\r\n')
-        request_line = headers[0]
-        parts = request_line.split()
-        if len(parts) < 2:
-            writer.close()
-            return
-        method, path = parts[0], parts[1]
-
-        # Проверяем, не WebSocket ли это (GET + Upgrade: websocket)
-        if method.upper() == 'GET' and any('Upgrade: websocket' in h for h in headers):
-            # Это WebSocket handshake. Нужно передать управление websockets.
-            # Помещаем уже прочитанные данные обратно в reader.
-            # Создадим новый StreamReader, который сначала отдаст data, затем продолжит чтение из оригинального reader.
-            # Передадим его в websockets.server.serve или вручную обработаем.
-            # Воспользуемся внутренним механизмом websockets.
-            await handle_ws_upgrade(reader, writer, data)
-            return
-
-        # Обычный HTTP запрос
-        if path == '/healthz':
-            body = "OK"
-            if method.upper() == 'HEAD':
-                response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n"
-            else:
-                response = f"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {len(body)}\r\n\r\n{body}".encode()
-            writer.write(response)
-        else:
-            writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
-        await writer.drain()
-        writer.close()
-        await writer.wait_closed()
-        return
-
-    # Если не HTTP – просто закрываем
-    writer.close()
-
-async def handle_ws_upgrade(reader, writer, initial_data):
-    # Создаём буферизованный reader, который сначала отдаст initial_data
-    class BufferedReader:
-        def __init__(self, prefix, reader):
-            self._prefix = prefix
-            self._reader = reader
-            self._offset = 0
-
-        async def read(self, n=-1):
-            if self._offset < len(self._prefix):
-                chunk = self._prefix[self._offset:self._offset+n] if n > 0 else self._prefix[self._offset:]
-                self._offset += len(chunk)
-                if n > 0 and len(chunk) < n:
-                    rest = await self._reader.read(n - len(chunk))
-                    return chunk + rest
-                return chunk
-            return await self._reader.read(n)
-
-        async def readexactly(self, n):
-            data = b''
-            while len(data) < n:
-                chunk = await self.read(n - len(data))
-                if not chunk:
-                    raise asyncio.IncompleteReadError(data, n)
-                data += chunk
-            return data
-
-        def at_eof(self):
-            return self._offset >= len(self._prefix) and self._reader.at_eof()
-
-    # Создаём объект websocket соединения через websockets.server.WebSocketServerProtocol
-    # Но проще использовать функцию websockets.server.serve с уже готовым сокетом.
-    # Документация websockets показывает, как создать сервер из существующего reader/writer.
-    # Вот работающий способ (для версии websockets 11+):
-    from websockets.asyncio.server import ServerConnection
-
-    class MyServerProtocol(websockets.ServerProtocol):
-        pass
-
-    protocol = MyServerProtocol()
-    connection = ServerConnection(protocol, reader=BufferedReader(initial_data, reader), writer=writer)
-    # Запускаем обработчик игры
-    await game.ws_handler(connection)
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     asyncio.run(main())
