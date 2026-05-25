@@ -7,8 +7,8 @@ async def echo(websocket, path):
     await websocket.send(f"Эхо: {message}")
 
 async def main():
-  server = await websockets.serve(echo, "localhost", 8765)
-  print("Сервер запущен на ws://localhost:8765")
+  server = await websockets.serve(echo, "", 8765)
+  print("Сервер запущен на ws://localhost:8765", server)
   await server.wait_closed()
 
 if name == "main":
