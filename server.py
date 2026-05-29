@@ -161,6 +161,16 @@ class BlackjackGame:
                 await ws.close()
                 return ws
 
+            # Удаляем все закрытые WebSocket-соединения
+            inactive = [ws for ws in self.players if ws.closed]
+            for ws in inactive:
+                name = self.players[ws]['name']
+                del self.players[ws]
+                logger.info(f"Очищено неактивное соединение игрока {name}")
+            if inactive and len(self.players) < 2:
+                self.phase = 'waiting'
+                await self.broadcast_state()
+            
             if len(self.players) >= 2:
                 await ws.send_str(json.dumps({'error': 'Стол полон'}))
                 await ws.close()
