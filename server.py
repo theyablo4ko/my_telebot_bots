@@ -96,6 +96,15 @@ class BlackjackGame:
         self.result = "\n".join(msgs)
 
     async def broadcast_state(self):
+        # Безопасно формируем отображаемую руку дилера
+        if self.dealer_hand:
+            if self.phase in ('dealer', 'finished'):
+                dealer_display = self.dealer_hand
+            else:
+                dealer_display = [self.dealer_hand[0]]
+        else:
+            dealer_display = []
+
         state = {
             'phase': self.phase,
             'current_turn': self.current_turn,
@@ -106,7 +115,7 @@ class BlackjackGame:
                 'bet': self.bets.get(p['name'], 0),
                 'status': p['status']
             } for p in self.players.values()},
-            'dealer_hand': self.dealer_hand if self.phase in ('dealer', 'finished') else [self.dealer_hand[0]],
+            'dealer_hand': dealer_display,
             'dealer_score': self.hand_score(self.dealer_hand) if self.phase == 'finished' else None,
             'result': self.result
         }
@@ -149,7 +158,6 @@ class BlackjackGame:
             self.players[ws] = {'name': name, 'hand': [], 'balance': 100, 'status': 'waiting'}
             logger.info(f"Игрок {name} подключился")
 
-            # Всегда отправляем состояние сразу после подключения
             await self.broadcast_state()
 
             if len(self.players) == 2:
@@ -233,7 +241,7 @@ class BlackjackGame:
                 await self.broadcast_state()
         return ws
 
-# ---------- Создаём игру ДО маршрутов ----------
+# ---------- Создаём игру ----------
 game = BlackjackGame()
 
 async def health_check(request):
