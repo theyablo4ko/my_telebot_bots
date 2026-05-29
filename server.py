@@ -100,8 +100,10 @@ class BlackjackGame:
                 logger.error(f"Error resolving player {p.get('name', '?')}: {e}\n{traceback.format_exc()}")
         self.result = "\n".join(msgs)
 
-    async def broadcast_state(self):
-        if self.dealer_hand:
+async def broadcast_state(self):
+    logger.info(f"broadcast_state called. phase={self.phase}, players={list(p['name'] for p in self.players.values())}")
+   
+    if self.dealer_hand:
             if self.phase in ('dealer', 'finished'):
                 dealer_display = self.dealer_hand
             else:
@@ -123,11 +125,18 @@ class BlackjackGame:
             'dealer_score': self.hand_score(self.dealer_hand) if self.phase == 'finished' else None,
             'result': self.result
         }
-        if self.players:
-            message = json.dumps(state)
-            logger.info(f"Broadcasting state to {len(self.players)} player(s)")
-            tasks = [asyncio.create_task(ws.send_str(message)) for ws in self.players]
-            await asyncio.gather(*tasks, return_exceptions=True)
+    
+    if self.players:
+        message = json.dumps(state)
+        logger.info(f"Broadcasting: {message[:200]}...")  # первые 200 символов
+        tasks = [asyncio.create_task(ws.send_str(message)) for ws in self.players]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for ws, res in zip(self.players, results):
+            if isinstance(res, Exception):
+                logger.error(f"Failed to send to {self.players[ws]['name']}: {res}")
+    else:
+        logger.info("No players to broadcast.")
+    
 
     async def handle_ws(self, request):
         ws = web.WebSocketResponse()
