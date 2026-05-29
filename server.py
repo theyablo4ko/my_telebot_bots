@@ -5,7 +5,6 @@ import os
 import random
 from aiohttp import web, WSMsgType
 
-# Настройка логов
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -14,7 +13,7 @@ RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
 
 class BlackjackGame:
     def __init__(self):
-        self.players = {}          # ws -> player_data
+        self.players = {}
         self.phase = "waiting"
         self.deck = []
         self.dealer_hand = []
@@ -97,7 +96,6 @@ class BlackjackGame:
         self.result = "\n".join(msgs)
 
     async def broadcast_state(self):
-        """Отправляет текущее состояние всем подключённым игрокам."""
         state = {
             'phase': self.phase,
             'current_turn': self.current_turn,
@@ -123,7 +121,6 @@ class BlackjackGame:
         logger.info(f"WebSocket connection attempt from {request.remote}")
 
         try:
-            # Ждём первое сообщение — ник
             init_msg = await ws.receive()
             if init_msg.type != WSMsgType.TEXT:
                 logger.warning("First message is not text, closing")
@@ -149,20 +146,17 @@ class BlackjackGame:
                 await ws.close()
                 return ws
 
-            # Добавляем игрока
             self.players[ws] = {'name': name, 'hand': [], 'balance': 100, 'status': 'waiting'}
             logger.info(f"Игрок {name} подключился")
 
-            # Всегда отправляем состояние сразу после подключения (в том числе и waiting)
+            # Всегда отправляем состояние сразу после подключения
             await self.broadcast_state()
 
-            # Если набралось двое — начинаем фазу ставок
             if len(self.players) == 2:
                 self.phase = 'betting'
                 self.current_turn = list(self.players.values())[0]['name']
                 await self.broadcast_state()
 
-            # Основной цикл приёма сообщений
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
                     logger.info(f"Message from {name}: {msg.data}")
@@ -173,7 +167,7 @@ class BlackjackGame:
                         continue
 
                     action = data.get('action')
-                    # Обработка действий (точно как раньше)
+
                     if self.phase == 'betting' and action == 'bet':
                         bet = data.get('amount', 0)
                         me = self.players[ws]
@@ -195,7 +189,6 @@ class BlackjackGame:
                         else:
                             self.player_stand(self.players[ws]['name'])
 
-                        # Переход хода
                         players_list = list(self.players.values())
                         idx = next(i for i, p in enumerate(players_list) if p['name'] == self.current_turn)
                         next_idx = (idx + 1) % len(players_list)
@@ -240,7 +233,9 @@ class BlackjackGame:
                 await self.broadcast_state()
         return ws
 
-# ---------- HTTP health check + логирование ----------
+# ---------- Создаём игру ДО маршрутов ----------
+game = BlackjackGame()
+
 async def health_check(request):
     logger.info(f"Health check from {request.remote}")
     return web.Response(text="OK")
@@ -252,10 +247,9 @@ async def log_middleware(request, handler):
 
 app = web.Application(middlewares=[log_middleware])
 app.router.add_get('/healthz', health_check)
-app.router.add_get('/ws', game.handle_ws)   # game определится ниже
+app.router.add_get('/ws', game.handle_ws)
 
 if __name__ == '__main__':
-    game = BlackjackGame()
     port = int(os.environ.get('PORT', 8765))
     logger.info(f"Starting server on port {port}")
     web.run_app(app, host='0.0.0.0', port=port)
