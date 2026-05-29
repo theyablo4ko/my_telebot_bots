@@ -336,7 +336,7 @@ async def log_middleware(request, handler):
 
 app = web.Application(middlewares=[log_middleware])
 app.router.add_get('/healthz', health_check)
-app.router.add_get('/ws', game.handle_ws)
+app.router.add_get('/ws', game.handle_ws())
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8765))
