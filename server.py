@@ -101,30 +101,55 @@ class BlackjackGame:
         self.result = "\n".join(msgs)
 
 async def broadcast_state(self):
-    logger.info(f"broadcast_state called. phase={self.phase}, players={list(p['name'] for p in self.players.values())}")
-   
-    if self.dealer_hand:
-            if self.phase in ('dealer', 'finished'):
-                dealer_display = self.dealer_hand
-            else:
-                dealer_display = [self.dealer_hand[0]]
-        else:
-            dealer_display = []
+    """Формирует состояние игры и рассылает его всем подключённым игрокам."""
+    # Логируем вызов и текущее состояние
+    player_names = [p['name'] for p in self.players.values()]
+    logger.info(f"broadcast_state вызван. Фаза: {self.phase}, игроки: {player_names}")
 
-        state = {
-            'phase': self.phase,
-            'current_turn': self.current_turn,
-            'players': {p['name']: {
-                'hand': p['hand'],
-                'score': self.hand_score(p['hand']),
-                'balance': p['balance'],
-                'bet': self.bets.get(p['name'], 0),
-                'status': p['status']
-            } for p in self.players.values()},
-            'dealer_hand': dealer_display,
-            'dealer_score': self.hand_score(self.dealer_hand) if self.phase == 'finished' else None,
-            'result': self.result
-        }
+    # Безопасно формируем отображение руки дилера
+    if self.dealer_hand:
+        if self.phase in ('dealer', 'finished'):
+            dealer_display = self.dealer_hand
+        else:
+            dealer_display = [self.dealer_hand[0]]
+    else:
+        dealer_display = []
+
+    # Собираем состояние в словарь
+    state = {
+        'phase': self.phase,
+        'current_turn': self.current_turn,
+        'players': {p['name']: {
+            'hand': p['hand'],
+            'score': self.hand_score(p['hand']),
+            'balance': p['balance'],
+            'bet': self.bets.get(p['name'], 0),
+            'status': p['status']
+        } for p in self.players.values()},
+        'dealer_hand': dealer_display,
+        'dealer_score': self.hand_score(self.dealer_hand) if self.phase == 'finished' else None,
+        'result': self.result
+    }
+
+    # Если нет игроков – просто выходим
+    if not self.players:
+        logger.info("Нет игроков для broadcast.")
+        return
+
+    # Сериализуем и логируем начало сообщения (чтобы не засорять логи)
+    message = json.dumps(state)
+    logger.info(f"Отправка состояния ({len(message)} байт) {len(self.players)} игрокам: {message[:200]}...")
+
+    # Создаём задачи для асинхронной отправки
+    tasks = [asyncio.create_task(ws.send_str(message)) for ws in self.players]
+    # Ждём выполнения всех задач, но не падаем, если у кого-то ошибка
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Проверяем ошибки
+    for ws, res in zip(self.players, results):
+        if isinstance(res, Exception):
+            name = self.players[ws]['name']
+            logger.error(f"Ошибка отправки игроку {name}: {res}")
     
     if self.players:
         message = json.dumps(state)
