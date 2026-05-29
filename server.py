@@ -326,12 +326,10 @@ class BlackjackGame:
 game = BlackjackGame()
 
 async def health_check(request):
-    logger.info(f"Health check from {request.remote}")
     return web.Response(text="OK")
 
 @web.middleware
 async def log_middleware(request, handler):
-    logger.info(f"HTTP {request.method} {request.path} from {request.remote}")
     return await handler(request)
 
 app = web.Application(middlewares=[log_middleware])
