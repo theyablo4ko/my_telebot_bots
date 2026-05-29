@@ -96,7 +96,7 @@ class BlackjackGame:
         self.result = "\n".join(msgs)
 
     async def broadcast_state(self):
-        # Безопасно формируем отображаемую руку дилера
+        # Безопасное формирование руки дилера
         if self.dealer_hand:
             if self.phase in ('dealer', 'finished'):
                 dealer_display = self.dealer_hand
@@ -122,7 +122,10 @@ class BlackjackGame:
         if self.players:
             message = json.dumps(state)
             logger.info(f"Broadcasting state to {len(self.players)} player(s)")
-            await asyncio.wait([ws.send_str(message) for ws in self.players])
+            # Явно создаём задачи для каждой корутины send_str
+            tasks = [asyncio.create_task(ws.send_str(message)) for ws in self.players]
+            # Ожидаем завершения всех задач, игнорируя возможные ошибки в отдельных соединениях
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def handle_ws(self, request):
         ws = web.WebSocketResponse()
