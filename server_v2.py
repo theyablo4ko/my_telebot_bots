@@ -1,17 +1,26 @@
 # =============================================================
-# СЕРВЕР БЛЕКДЖЕКА
+# СЕРВЕР БЛЕКДЖЕКА (Деплой на Render.com)
 # =============================================================
 # Запуск:  python server.py
 # Порт:    берётся из переменной окружения PORT (Render задаёт сам)
 #          если PORT не задан — используем 8765 (для локального запуска)
+#
+# Что делает этот файл:
+#   - Принимает подключения от игроков через WebSocket
+#   - Отвечает на HTTP запросы для Health Check от Render
+#   - Хранит всё состояние игры (карты, кредиты, очередь ходов)
+#   - Рассылает обновления всем игрокам после каждого действия
+#
+# Установка зависимости (один раз):
+#   pip install aiohttp
 # =============================================================
 
 import asyncio
 import json
 import random
-import websockets
 import datetime
 import os
+from aiohttp import web
 
 
 # =============================================================
@@ -19,7 +28,8 @@ import os
 # =============================================================
 
 def new_deck():
-    suits  = ["S", "H", "D", "C"]
+    """Создаёт перемешанную колоду из 52 карт."""
+    suits  = ["S", "H", "D", "C"]   # Spades, Hearts, Diamonds, Clubs
     values = ["2","3","4","5","6","7","8","9","10","J","Q","K","A"]
     deck = [v + s for s in suits for v in values]
     random.shuffle(deck)
@@ -27,7 +37,8 @@ def new_deck():
 
 
 def card_value(card: str) -> int:
-    v = card[:-1]
+    """Числовое значение одной карты (туз = 11, картинки = 10)."""
+    v = card[:-1]          # убираем масть (последний символ)
     if v in ("J", "Q", "K"):
         return 10
     if v == "A":
@@ -36,6 +47,10 @@ def card_value(card: str) -> int:
 
 
 def hand_total(cards: list) -> int:
+    """
+    Сумма карт в руке.
+    Туз автоматически считается как 1, если в руке перебор.
+    """
     total = sum(card_value(c) for c in cards)
     aces  = sum(1 for c in cards if c[:-1] == "A")
     while total > 21 and aces:
@@ -45,20 +60,22 @@ def hand_total(cards: list) -> int:
 
 
 # =============================================================
-# СОСТОЯНИЕ ИГРЫ
+# СОСТОЯНИЕ ИГРЫ  (один глобальный словарь — всё в одном месте)
 # =============================================================
 
 state = {
-    "phase": "lobby",
-    "host": None,
-    "order": [],
-    "players": {},
+    "phase": "lobby",     # lobby | betting | playing | results
+    "host": None,         # id хоста (первый подключившийся)
+    "order": [],          # список id игроков в порядке подключения
+    "players": {},        # id -> { name, credits, bet, hand, status }
     "dealer_hand": [],
-    "current": None,
+    "current": None,      # id игрока, чья сейчас очередь
     "deck": [],
 }
 
+# websocket-объект для каждого игрока: id -> websocket
 connections: dict = {}
+
 _next_id = 0
 
 def make_id() -> str:
@@ -72,6 +89,10 @@ def make_id() -> str:
 # =============================================================
 
 def build_snapshot(viewer_id: str) -> dict:
+    """
+    Формирует снимок состояния для конкретного игрока.
+    Пока идут ходы — вторая карта дилера скрыта.
+    """
     hide_dealer = state["phase"] == "playing"
 
     dealer_visible = (
@@ -104,9 +125,10 @@ def build_snapshot(viewer_id: str) -> dict:
 
 
 async def broadcast():
+    """Отправляет актуальное состояние всем подключённым игрокам."""
     for pid, ws in list(connections.items()):
         try:
-            await ws.send(json.dumps(build_snapshot(pid)))
+            await ws.send_json(build_snapshot(pid))
         except Exception:
             pass
 
@@ -116,12 +138,14 @@ async def broadcast():
 # =============================================================
 
 def draw() -> str:
+    """Берёт верхнюю карту из колоды; если кончилась — тасует заново."""
     if len(state["deck"]) < 15:
         state["deck"] = new_deck()
     return state["deck"].pop()
 
 
 async def start_betting():
+    """Переход к фазе ставок: сбрасываем руки, просим всех поставить."""
     state["phase"]       = "betting"
     state["dealer_hand"] = []
     state["current"]     = None
@@ -134,6 +158,7 @@ async def start_betting():
 
 
 async def try_start_playing():
+    """Если все игроки поставили ставку — раздаём карты."""
     all_bet = all(state["players"][pid]["bet"] > 0 for pid in state["order"])
     if not all_bet:
         return
@@ -149,11 +174,13 @@ async def try_start_playing():
 
 
 async def give_turn(pid: str):
+    """Устанавливает очередь хода для игрока pid."""
     state["current"] = pid
     state["players"][pid]["status"] = "acting"
 
 
 async def next_turn():
+    """Передаёт ход следующему игроку; если все прошли — ход дилера."""
     order   = state["order"]
     current = state["current"]
 
@@ -162,6 +189,7 @@ async def next_turn():
         return
 
     idx = order.index(current)
+
     nxt = None
     for i in range(idx + 1, len(order)):
         if state["players"][order[i]]["status"] == "waiting":
@@ -176,6 +204,7 @@ async def next_turn():
 
 
 async def dealer_turn():
+    """Дилер добирает карты до суммы >= 17, затем подводим итоги."""
     state["current"] = None
     while hand_total(state["dealer_hand"]) < 17:
         state["dealer_hand"].append(draw())
@@ -183,6 +212,7 @@ async def dealer_turn():
 
 
 async def resolve():
+    """Сравниваем руки, начисляем/снимаем кредиты."""
     state["phase"] = "results"
     d_total = hand_total(state["dealer_hand"])
     d_bust  = d_total > 21
@@ -211,6 +241,8 @@ async def resolve():
 # =============================================================
 
 async def handle(pid: str, msg: dict):
+    """Разбирает входящую команду и вызывает нужную функцию."""
+
     cmd = msg.get("cmd")
 
     if cmd == "join":
@@ -265,23 +297,48 @@ async def handle(pid: str, msg: dict):
 
 
 # =============================================================
-# ПОДКЛЮЧЕНИЕ / ОТКЛЮЧЕНИЕ
+# HTTP HEALTH CHECK ДЛЯ RENDER
 # =============================================================
 
-async def on_connect(ws):
+async def health_check(request):
+    """
+    Отвечает на HTTP GET запросы от Render.
+    Render делает этот запрос каждые несколько секунд, чтобы проверить,
+    что сервер жив. Если не отвечать 200 OK, Render перезапустит контейнер.
+    """
+    return web.Response(text="OK - Blackjack server is running")
+
+
+# =============================================================
+# ПОДКЛЮЧЕНИЕ / ОТКЛЮЧЕНИЕ (WebSocket)
+# =============================================================
+
+async def websocket_handler(request):
+    """
+    Вызывается при каждом новом WebSocket подключении.
+    Обрабатывает подключения игроков и их команды.
+    """
+    # Создаем WebSocket ответ
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)  # "Апгрейдим" HTTP соединение до WebSocket
+
     pid = make_id()
     connections[pid] = ws
     print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] [conn]  новое соединение  id={pid}")
 
-    await ws.send(json.dumps({"type": "welcome", "your_id": pid}))
+    await ws.send_json({"type": "welcome", "your_id": pid})
 
     try:
-        async for raw in ws:
-            try:
-                data = json.loads(raw)
-                await handle(pid, data)
-            except json.JSONDecodeError:
-                print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] [warn]  некорректный JSON от {pid}")
+        async for msg in ws:
+            if msg.type == web.WSMsgType.TEXT:
+                try:
+                    data = json.loads(msg.data)
+                    await handle(pid, data)
+                except json.JSONDecodeError:
+                    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] [warn]  некорректный JSON от {pid}")
+            elif msg.type == web.WSMsgType.ERROR:
+                print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] [error] ошибка WebSocket от {pid}: {ws.exception()}")
+                break
     finally:
         print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] [leave]  отключился id={pid}")
         connections.pop(pid, None)
@@ -301,12 +358,20 @@ async def on_connect(ws):
         else:
             await broadcast()
 
+    return ws
+
 
 # =============================================================
 # ТОЧКА ВХОДА
 # =============================================================
 
+def clear():
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+
 async def main():
+    clear()
+    
     # Render передаёт порт через переменную окружения PORT.
     # int(...) преобразует строку "10000" в число 10000.
     # or 8765 — если переменной нет (локальный запуск), используем 8765.
@@ -316,13 +381,30 @@ async def main():
     # На локальной машине это тоже работает нормально.
     host = "0.0.0.0"
 
+    # Создаем aiohttp приложение
+    app = web.Application()
+    
+    # Регистрируем маршруты:
+    # На корень "/" вешаем HTTP-ответ для Health Check от Render
+    app.router.add_get('/', health_check)
+    
+    # На путь "/ws" вешаем наш WebSocket-сервер для игры
+    app.router.add_get('/ws', websocket_handler)
+
+    # Запускаем сервер
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host, port)
+    await site.start()
+
     print("=" * 45)
     print("  Блекджек-сервер запущен")
-    print(f"  Слушаем: {host}:{port}")
+    print(f"  Health-check (HTTP): http://{host}:{port}/")
+    print(f"  Адрес для игры (WS): ws://{host}:{port}/ws")
     print("=" * 45)
 
-    async with websockets.serve(on_connect, host, port):
-        await asyncio.Future()
+    # Держим сервер запущенным бесконечно
+    await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
