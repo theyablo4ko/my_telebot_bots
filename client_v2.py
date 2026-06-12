@@ -1,15 +1,10 @@
 # =============================================================
-# КЛИЕНТ БЛЕКДЖЕКА  (консоль)
+# КЛИЕНТ БЛЕКДЖЕКА  (консоль, цветной)
 # =============================================================
 # Запуск:  python client.py
 #
-# Что делает этот файл:
-#   - Подключается к серверу по WebSocket
-#   - Получает обновления состояния и отображает их в консоли
-#   - Читает команды пользователя из терминала
-#
-# Установка зависимости (один раз):
-#   pip install websockets
+# Зависимости (один раз):
+#   pip install websockets colorama
 # =============================================================
 
 import asyncio
@@ -17,8 +12,14 @@ import json
 import sys
 import websockets
 import os
+import time
 
-SERVER = "ws://localhost:8765"
+from colorama import Fore, Back, Style, init
+
+# Инициализация colorama (нужно для корректной работы цветов в Windows)
+init(autoreset=True)
+
+SERVER = "wss://my-telebot-bots-oitl.onrender.com/ws"
 
 # Сохраняем последнее состояние, чтобы перерисовывать экран
 last_state = None
@@ -29,63 +30,124 @@ input_queue: asyncio.Queue = None
 
 
 # =============================================================
+# ЦВЕТОВАЯ ПАЛИТРА
+# =============================================================
+
+# Общие элементы
+C_BORDER   = Fore.CYAN + Style.BRIGHT
+C_TITLE    = Fore.CYAN + Style.BRIGHT
+C_RESET    = Style.RESET_ALL
+
+# Игроки
+C_ME       = Fore.GREEN + Style.BRIGHT     # "ты"
+C_HOST     = Fore.MAGENTA + Style.BRIGHT   # хост
+C_NAME     = Fore.WHITE                    # обычный игрок
+C_CREDITS  = Fore.YELLOW                   # кредиты
+C_BET      = Fore.CYAN                     # ставка
+
+# Карты
+C_RED_SUIT   = Fore.RED + Style.BRIGHT     # ♥ ♦
+C_BLACK_SUIT = Fore.WHITE + Style.BRIGHT   # ♠ ♣
+C_HIDDEN     = Fore.LIGHTBLACK_EX          # ??
+
+# Статусы игрока
+C_WAITING  = Fore.LIGHTBLACK_EX
+C_ACTING   = Fore.YELLOW + Style.BRIGHT    # ">>> ХОД <<<"
+C_STAND    = Fore.BLUE
+C_BUST     = Fore.RED + Style.BRIGHT
+C_WIN      = Fore.GREEN + Style.BRIGHT
+C_LOSE     = Fore.RED
+C_PUSH     = Fore.LIGHTBLUE_EX
+
+# Фазы игры
+C_PHASE_LOBBY   = Fore.LIGHTBLACK_EX
+C_PHASE_BETTING = Fore.YELLOW
+C_PHASE_PLAYING = Fore.GREEN + Style.BRIGHT
+C_PHASE_RESULTS = Fore.MAGENTA + Style.BRIGHT
+
+# Дилер
+C_DEALER   = Fore.YELLOW + Style.BRIGHT
+
+# Подсказки
+C_HINT     = Fore.LIGHTBLACK_EX
+C_HINT_CMD = Fore.LIGHTCYAN_EX             # команды в подсказках
+
+# Итоги раунда
+C_RES_WIN  = Fore.GREEN + Style.BRIGHT
+C_RES_LOSE = Fore.RED
+C_RES_BUST = Fore.RED + Style.BRIGHT
+C_RES_PUSH = Fore.CYAN
+
+
+# =============================================================
 # ОТРИСОВКА СОСТОЯНИЯ
 # =============================================================
 
 SUIT_MAP = {"S": "♠", "H": "♥", "D": "♦", "C": "♣"}
 
 def pretty_card(card: str) -> str:
-    """Превращает 'AH' → 'A♥', '10S' → '10♠', '??' → '??'"""
+    """Превращает 'AH' → 'A♥', '10S' → '10♠', '??' → '??' с цветом."""
     if card == "??":
-        return "[??]"
-    suit = SUIT_MAP.get(card[-1], card[-1])
+        return f"{C_HIDDEN}[??]{C_RESET}"
+    suit_char = SUIT_MAP.get(card[-1], card[-1])
     val  = card[:-1]
-    return f"[{val}{suit}]"
+    # Красные масти — красным, чёрные — белым
+    if card[-1] in ("H", "D"):
+        color = C_RED_SUIT
+    else:
+        color = C_BLACK_SUIT
+    return f"{color}[{val}{suit_char}]{C_RESET}"
 
 def pretty_hand(hand: list) -> str:
     return "  ".join(pretty_card(c) for c in hand)
 
 STATUS_LABELS = {
-    "waiting": "ожидает",
-    "acting":  ">>> ХОД <<<",
-    "stand":   "стоп",
-    "bust":    "ПЕРЕБОР",
-    "win":     "ПОБЕДА  +",
-    "lose":    "проигрыш -",
-    "push":    "ничья",
+    "waiting": ("ожидает",    C_WAITING),
+    "acting":  (">>> ХОД <<<", C_ACTING),
+    "stand":   ("стоп",       C_STAND),
+    "bust":    ("ПЕРЕБОР",    C_BUST),
+    "win":     ("ПОБЕДА  +",  C_WIN),
+    "lose":    ("проигрыш -", C_LOSE),
+    "push":    ("ничья",      C_PUSH),
 }
 
 def render(s: dict):
     """Очищает экран и рисует текущее состояние игры."""
     print("\033[2J\033[H", end="")   # очистить терминал
-
     clear()
 
     phase_labels = {
-        "lobby":   "Лобби — ждём игроков",
-        "betting": "Фаза ставок",
-        "playing": "Идёт игра",
-        "results": "Итоги раунда",
+        "lobby":   ("Лобби — ждём игроков",  C_PHASE_LOBBY),
+        "betting": ("Фаза ставок",           C_PHASE_BETTING),
+        "playing": ("Идёт игра",             C_PHASE_PLAYING),
+        "results": ("Итоги раунда",          C_PHASE_RESULTS),
     }
-    print("=" * 55)
-    print(f"  БЛЕКДЖЕК  |  {phase_labels.get(s['phase'], s['phase'])}")
-    print("=" * 55)
+    phase_text, phase_color = phase_labels.get(s['phase'], (s['phase'], C_RESET))
+
+    print(f"{C_BORDER}{'=' * 55}{C_RESET}")
+    print(f"{C_TITLE}  БЛЕКДЖЕК{C_RESET}  |  {phase_color}{phase_text}{C_RESET}")
+    print(f"{C_BORDER}{'=' * 55}{C_RESET}")
 
     # ── Рука дилера ─────────────────────────────────────────
-    print(f"\n  ДИЛЕР:  {pretty_hand(s['dealer_hand'])}   ({s['dealer_total']})")
+    print(f"\n  {C_DEALER}ДИЛЕР:{C_RESET}  {pretty_hand(s['dealer_hand'])}   ({C_DEALER}{s['dealer_total']}{C_RESET})")
     print()
 
     # ── Игроки ──────────────────────────────────────────────
     for pid in s["order"]:
         p    = s["players"][pid]
-        me   = " (ты)" if pid == s["my_id"] else ""
-        host = " [ХОСТ]" if pid == s["host"] else ""
-        lbl  = STATUS_LABELS.get(p["status"], p["status"])
+        is_me = (pid == s["my_id"])
+        is_host = (pid == s["host"])
 
-        print(f"  {p['name']}{me}{host}")
-        print(f"    Кредиты: {p['credits']}  |  Ставка: {p['bet']}  |  {lbl}")
+        me_str   = f" {C_ME}(ты){C_RESET}" if is_me else ""
+        host_str = f" {C_HOST}[ХОСТ]{C_RESET}" if is_host else ""
+
+        name_color = C_ME if is_me else C_NAME
+        lbl_text, lbl_color = STATUS_LABELS.get(p["status"], (p["status"], C_RESET))
+
+        print(f"  {name_color}{p['name']}{C_RESET}{me_str}{host_str}")
+        print(f"    {C_CREDITS}Кредиты: {p['credits']}{C_RESET}  |  {C_BET}Ставка: {p['bet']}{C_RESET}  |  {lbl_color}{lbl_text}{C_RESET}")
         if p["hand"]:
-            print(f"    Карты:  {pretty_hand(p['hand'])}   ({p['total']})")
+            print(f"    Карты:  {pretty_hand(p['hand'])}   ({C_CREDITS}{p['total']}{C_RESET})")
         print()
 
     # ── Итоги раунда (показываем только когда фаза results) ─
@@ -93,7 +155,7 @@ def render(s: dict):
         _print_results(s)
 
     # ── Подсказка по доступным командам ─────────────────────
-    print("-" * 55)
+    print(f"{C_BORDER}{'-' * 55}{C_RESET}")
     _print_hint(s)
     print()
 
@@ -103,49 +165,38 @@ def _print_results(s: dict):
     Рисует красивую таблицу итогов раунда.
     Вызывается только когда phase == 'results'.
     """
-
-    # Иконки и текст для каждого исхода
-    # Ключ — статус игрока который пришёл с сервера
     RESULT_STYLE = {
-        "win":  ("🏆", "ПОБЕДА",   "+"),   # (иконка, слово, знак перед суммой)
-        "lose": ("💸", "ПРОИГРЫШ", "-"),
-        "bust": ("💥", "ПЕРЕБОР",  "-"),
-        "push": ("🤝", "НИЧЬЯ",    " "),
+        "win":  ("🏆", "ПОБЕДА",   "+", C_RES_WIN),
+        "lose": ("💸", "ПРОИГРЫШ", "-", C_RES_LOSE),
+        "bust": ("💥", "ПЕРЕБОР",  "-", C_RES_BUST),
+        "push": ("🤝", "НИЧЬЯ",    " ", C_RES_PUSH),
     }
 
-    print("=" * 55)
-    print("  ИТОГИ РАУНДА")
-    print("=" * 55)
+    print(f"\n{C_BORDER}{'=' * 55}{C_RESET}")
+    print(f"{C_TITLE}  ИТОГИ РАУНДА{C_RESET}")
+    print(f"{C_BORDER}{'=' * 55}{C_RESET}")
 
-    # Проходим по каждому игроку в порядке очереди
     for pid in s["order"]:
         p = s["players"][pid]
+        icon, word, sign, color = RESULT_STYLE.get(p["status"], ("?", p["status"], "", C_RESET))
 
-        # Берём иконку/слово/знак для этого игрока
-        # Если статус незнакомый — показываем заглушку
-        icon, word, sign = RESULT_STYLE.get(p["status"], ("?", p["status"], ""))
-
-        # Считаем на сколько изменились кредиты за этот раунд
-        # bust и lose — игрок теряет ставку, win — получает, push — ничего
         if p["status"] in ("lose", "bust"):
-            delta = p["bet"]          # потерял столько
+            delta = p["bet"]
         elif p["status"] == "win":
-            delta = p["bet"]          # выиграл столько
+            delta = p["bet"]
         else:
-            delta = 0                 # ничья — ничего не изменилось
+            delta = 0
 
-        # Пометка "(ты)" только для нашего игрока
-        me = " (ты)" if pid == s["my_id"] else ""
+        me = f" {C_ME}(ты){C_RESET}" if pid == s["my_id"] else ""
 
-        # Строка итога, например:  🏆 ПОБЕДА   Вася (ты)  +100 кр.  → итого: 1100
-        print(f"  {icon}  {word:<10}  {p['name']}{me}")
+        print(f"  {icon}  {color}{word:<10}{C_RESET}  {C_NAME}{p['name']}{C_RESET}{me}")
         if delta > 0:
-            print(f"             Ставка: {p['bet']}  →  {sign}{delta} кр.  |  Кредиты: {p['credits']}")
+            print(f"             {C_BET}Ставка: {p['bet']}{C_RESET}  →  {color}{sign}{delta} кр.{C_RESET}  |  {C_CREDITS}Кредиты: {p['credits']}{C_RESET}")
         else:
-            print(f"             Ставка: {p['bet']}  →  без изменений  |  Кредиты: {p['credits']}")
+            print(f"             {C_BET}Ставка: {p['bet']}{C_RESET}  →  {C_HINT}без изменений{C_RESET}  |  {C_CREDITS}Кредиты: {p['credits']}{C_RESET}")
         print()
 
-    print("=" * 55)
+    print(f"{C_BORDER}{'=' * 55}{C_RESET}")
     print()
 
 
@@ -156,32 +207,32 @@ def _print_hint(s: dict):
 
     if phase == "lobby":
         if pid == s["host"]:
-            print("  Введите  start  — чтобы начать игру")
+            print(f"  {C_HINT}Введите{C_RESET}  {C_HINT_CMD}start{C_RESET}  {C_HINT}— чтобы начать игру{C_RESET}")
         else:
-            print("  Ждём, пока хост начнёт игру...")
+            print(f"  {C_HINT}Ждём, пока хост начнёт игру...{C_RESET}")
 
     elif phase == "betting":
         p = s["players"].get(pid, {})
         if p.get("bet", 0) == 0:
-            print(f"  Введите  bet <сумма>  — сделать ставку")
-            print(f"  Пример:  bet 100")
+            print(f"  {C_HINT}Введите{C_RESET}  {C_HINT_CMD}bet <сумма>{C_RESET}  {C_HINT}— сделать ставку{C_RESET}")
+            print(f"  {C_HINT}Пример:{C_RESET}  {C_HINT_CMD}bet 100{C_RESET}")
         else:
-            print(f"  Ставка сделана: {p['bet']}. Ждём остальных...")
+            print(f"  {C_HINT}Ставка сделана:{C_RESET} {C_BET}{p['bet']}{C_RESET}. {C_HINT}Ждём остальных...{C_RESET}")
 
     elif phase == "playing":
         if s["current"] == pid:
-            print("  Твой ход!")
-            print("  hit   — взять ещё карту")
-            print("  stand — остановиться")
+            print(f"  {C_ACTING}Твой ход!{C_RESET}")
+            print(f"  {C_HINT_CMD}hit{C_RESET}   {C_HINT}— взять ещё карту{C_RESET}")
+            print(f"  {C_HINT_CMD}stand{C_RESET} {C_HINT}— остановиться{C_RESET}")
         else:
             cur = s["players"].get(s["current"], {})
-            print(f"  Ход игрока: {cur.get('name','?')}. Ждём...")
+            print(f"  {C_HINT}Ход игрока:{C_RESET} {C_NAME}{cur.get('name','?')}{C_RESET}. {C_HINT}Ждём...{C_RESET}")
 
     elif phase == "results":
         if pid == s["host"]:
-            print("  Введите  start  — сыграть ещё раунд")
+            print(f"  {C_HINT}Введите{C_RESET}  {C_HINT_CMD}start{C_RESET}  {C_HINT}— сыграть ещё раунд{C_RESET}")
         else:
-            print("  Ждём, пока хост начнёт новый раунд...")
+            print(f"  {C_HINT}Ждём, пока хост начнёт новый раунд...{C_RESET}")
 
 
 # =============================================================
@@ -212,11 +263,37 @@ def parse_input(text: str, s: dict) -> dict | None:
         try:
             return {"cmd": "bet", "amount": int(parts[1])}
         except ValueError:
-            print("  Ошибка: сумма должна быть числом, например:  bet 100")
+            print(f"  {C_LOSE}Ошибка: сумма должна быть числом, например:{C_RESET}  {C_HINT_CMD}bet 100{C_RESET}")
             return None
 
-    print(f"  Неизвестная команда: {text.strip()}")
+    print(f"  {C_LOSE}Неизвестная команда:{C_RESET} {text.strip()}")
     return None
+
+
+# =============================================================
+# ПРОВЕРКА БАЛАНСА (автовыход при нуле кредитов)
+# =============================================================
+
+def check_balance_and_exit(msg: dict):
+    """
+    Проверяет баланс текущего игрока.
+    Если кредиты закончились (или игрока удалили из списка),
+    выводит сообщение и принудительно закрывает процесс.
+    """
+    global my_id
+    if my_id is None:
+        return
+
+    my_player = msg["players"].get(my_id)
+
+    if my_player is None or my_player.get("credits", 1) <= 0:
+        print(f"\n{C_BORDER}{'=' * 55}{C_RESET}")
+        print(f"  {C_RES_BUST}У вас закончились кредиты! Вы вылетели из игры.{C_RESET}")
+        print(f"P.S. можешь пойти в наш банк - tochno-ne-naebalovo.com и взять микрозайм со ставкой 200%")
+        print(f"{C_BORDER}{'=' * 55}{C_RESET}")
+        sys.stdout.flush()
+        time.sleep(3)
+        os._exit(0)
 
 
 # =============================================================
@@ -236,12 +313,13 @@ async def receive_loop(ws):
         if msg["type"] == "welcome":
             my_id = msg["your_id"]
             # Сразу отправляем команду «войти» с именем
-            name = input("  Введите ваше имя: ").strip() or f"Player{my_id}"
+            name = input(f"  {C_HINT}Введите ваше имя:{C_RESET} ").strip() or f"Player{my_id}"
             await ws.send(json.dumps({"cmd": "join", "name": name}))
 
         elif msg["type"] == "state":
             last_state = msg
             render(msg)
+            check_balance_and_exit(msg)
 
 
 async def input_loop():
@@ -251,7 +329,6 @@ async def input_loop():
     """
     loop = asyncio.get_event_loop()
     while True:
-        # run_in_executor позволяет вызвать блокирующий input() не блокируя всю программу
         line = await loop.run_in_executor(None, sys.stdin.readline)
         await input_queue.put(line)
 
@@ -268,8 +345,10 @@ async def send_loop(ws):
         if cmd:
             await ws.send(json.dumps(cmd))
 
+
 def clear():
-    os.system('cls')
+    os.system('cls' if os.name == 'nt' else 'clear')
+
 
 # =============================================================
 # ТОЧКА ВХОДА
@@ -280,11 +359,11 @@ async def main():
     global input_queue
     input_queue = asyncio.Queue()
 
-    print(f"Подключаемся к {SERVER} ...")
+    print(f"{C_HINT}Подключаемся к{C_RESET} {C_CREDITS}{SERVER}{C_RESET} {C_HINT}...{C_RESET}")
 
     try:
         async with websockets.connect(SERVER) as ws:
-            print("Подключено!\n")
+            print(f"{C_WIN}Подключено!{C_RESET}\n")
             # Запускаем все три задачи параллельно
             await asyncio.gather(
                 receive_loop(ws),
@@ -292,9 +371,13 @@ async def main():
                 send_loop(ws),
             )
     except ConnectionRefusedError:
-        print("\nОшибка: не удалось подключиться к серверу.")
-        print("Убедитесь, что сервер запущен:  python server.py")
+        print(f"\n{C_LOSE}Ошибка: не удалось подключиться к серверу.{C_RESET}")
+        print(f"{C_HINT}Убедитесь, что сервер запущен:{C_RESET}  {C_HINT_CMD}python server.py{C_RESET}")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print(f"\n{C_HINT}Выход...{C_RESET}")
+        sys.exit(0)
