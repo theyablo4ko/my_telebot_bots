@@ -19,7 +19,7 @@ from colorama import Fore, Back, Style, init
 # Инициализация colorama (нужно для корректной работы цветов в Windows)
 init(autoreset=True)
 
-SERVER = "wss://my-telebot-bots-oitl.onrender.com/ws"
+SERVER = "wss://my-telebot-bots-oitl.onrender.com/ws" # if use local version, write "localhost:8765"
 
 # Сохраняем последнее состояние, чтобы перерисовывать экран
 last_state = None
