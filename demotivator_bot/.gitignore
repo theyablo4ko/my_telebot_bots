@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+info/token
+info/users.txt
+images/poor_quality/
+images/res_*
+images/dm_*
+tmp/
+*.log
+.DS_Store
